@@ -86,9 +86,9 @@ header[data-testid="stHeader"] {{ background:transparent; }}
 .brand-mark {{width:48px;height:48px;border-radius:50%;display:grid;place-items:center;background:radial-gradient(circle at 35% 30%,#2d67b9,#071a3b 70%);border:1px solid #3b6cab;font-size:24px;}}
 .brand-name {{font-weight:800;letter-spacing:5px;font-size:25px;line-height:1.1;}}
 .brand-sub {{color:#c1cce0;font-size:10px;letter-spacing:2.5px;margin-top:5px;}}
-.nav {{margin-left:auto;display:flex;gap:8px;flex-wrap:wrap;}}
-.nav span {{border:1px solid #263d5e;background:#0c1a30;border-radius:24px;padding:9px 13px;font-size:12px;color:#e1e9f8;}}
-.nav .active {{background:linear-gradient(100deg,#e951b0,#8e4a9d);border-color:#f45fbd;}}
+div[data-testid="stButton"] > button {{border:1px solid #263d5e;background:#0c1a30;border-radius:24px;padding:7px 8px;font-size:12px;color:#e1e9f8;white-space:nowrap;}}
+div[data-testid="stButton"] > button:hover {{border-color:#f45fbd;color:#fff;}}
+div[data-testid="stButton"] > button[kind="primary"] {{background:linear-gradient(100deg,#e951b0,#8e4a9d);border-color:#f45fbd;color:#fff;}}
 .hero {{position:relative;isolation:isolate;overflow:hidden;min-height:176px;padding:20px 22px 20px;border-radius:14px;margin:0 0 8px;}}
 .hero::before {{content:"";position:absolute;z-index:-2;inset:0;background-image:{HERO_BG_IMAGE};background-position:center,center,center 53%;background-size:cover;}}
 .hero::after {{content:"";position:absolute;z-index:-1;inset:auto 0 0;height:32px;background:linear-gradient(0deg,rgba(2,8,18,.38),transparent);}}
@@ -114,18 +114,45 @@ div[data-testid="stMetricLabel"] p {{color:{MUTED};}}
     unsafe_allow_html=True,
 )
 
+NAV_ITEMS = [
+    ("home", "⌂", "Home"),
+    ("explore_map", "⌖", "Explore Map"),
+    ("trends", "▥", "Trends"),
+    ("data_analysis", "▦", "Data &amp; Analysis"),
+    ("insights", "✧", "Insights"),
+    ("about", "ⓘ", "About"),
+]
+view = st.query_params.get("view", "home")
+if view not in {item[0] for item in NAV_ITEMS}:
+    view = "home"
 st.markdown(
-    """
+    f"""
 <div class="brand"><div class="brand-mark">✦</div>
   <div><div class="brand-name">NOVELLA</div><div class="brand-sub">ENVIRONMENTAL INTELLIGENCE FOR LUSAKA</div></div>
-  <div class="nav"><span class="active">⌂ &nbsp;Home</span><span>⌖ &nbsp;Explore Map</span><span>▥ &nbsp;Trends</span><span>▦ &nbsp;Data &amp; Analysis</span><span>✧ &nbsp;Insights</span><span>ⓘ &nbsp;About</span><span>◎ &nbsp;Lusaka</span></div>
 </div>
+""",
+    unsafe_allow_html=True,
+)
+
+nav_columns = st.columns([1, 1.35, .95, 1.45, 1, .85, .9], gap="small")
+for column, (key, icon, label) in zip(nav_columns, NAV_ITEMS):
+    with column:
+        if st.button(f"{icon}  {html.unescape(label)}", key=f"nav_{key}",
+                     type="primary" if view == key else "secondary", use_container_width=True):
+            st.query_params["view"] = key
+            st.rerun()
+with nav_columns[-1]:
+    if st.button("◎  Lusaka", key="nav_lusaka", use_container_width=True):
+        st.query_params["view"] = "home"
+        st.rerun()
+
+st.markdown(
+    """
 <div class="hero"><h1>Understanding how our cities are changing,<br>one <em>satellite image</em> at a time.</h1>
 <p>Explore Lusaka's environmental changes through satellite imagery and Earth observation data.</p></div>
 """,
     unsafe_allow_html=True,
 )
-
 
 # ---------- Data ----------
 def sanitize_text(s: str) -> str:
@@ -133,8 +160,8 @@ def sanitize_text(s: str) -> str:
     return re.sub(r"[^\w\s.\-]", "", s, flags=re.UNICODE)[:48].strip()
 
 
-@st.cache_data(show_spinner=False)
-def load_data() -> pd.DataFrame:
+@st.cache_data(show_spinner=False, ttl=30)
+def load_data(cache_version: int = 4) -> pd.DataFrame:
     resp = requests.get(f"{API_BASE_URL}/api/v1/observations", params={"limit": 20000}, timeout=10)
     resp.raise_for_status()
     records = resp.json().get("observations", [])
@@ -159,7 +186,7 @@ def load_data() -> pd.DataFrame:
 
 try:
     with st.spinner("Loading telemetry from NOVELLA API..."):
-        data = load_data()
+        data = load_data(cache_version=4)
 except Exception as exc:
     st.error(f"Telemetry failed to load from {API_BASE_URL}: {exc}")
     st.caption("Ensure the FastAPI backend is running (`python -m uvicorn main:app --reload --port 8000`).")
@@ -171,6 +198,8 @@ except Exception as exc:
 if data.empty:
     st.info("No valid telemetry records returned by the API. Check NOVELLA_DATA_PATH and the column schema.")
     st.stop()
+if {"zone_name", "lat", "lon"}.issubset(data.columns):
+    ZONES = data[["zone_id", "zone_name", "lat", "lon"]].drop_duplicates("zone_id").reset_index(drop=True)
 if st.session_state.get("dropped"):
     st.warning(f"Dropped {st.session_state['dropped']} malformed records.")
 
@@ -178,11 +207,15 @@ if st.session_state.get("dropped"):
 dates = sorted(data["date"].dt.date.unique())
 date_col, spacer = st.columns([1.2, 4])
 with date_col:
-    sel_date = (
-        st.select_slider("Observation date", options=dates, value=dates[-1], format_func=lambda d: d.isoformat())
-        if len(dates) > 1
-        else dates[0]
+    sel_date = st.select_slider(
+        "Observation date",
+        options=dates,
+        value=dates[-1],
+        format_func=lambda d: d.isoformat(),
+        key="observation_date",
     )
+if "data_source" in data and (data["data_source"] == "Simulated demo history").any():
+    st.caption("Earlier dates use simulated demonstration history; the latest processed CSV date is shown as CSV data.")
 
 # Drop existing zone_name/lat/lon before merging ZONES to prevent lat_x/lat_y suffixes
 snap_base = data[data["date"].dt.date == sel_date].drop(columns=["zone_name", "lat", "lon"], errors="ignore")
@@ -191,6 +224,156 @@ snap = snap_base.merge(ZONES, on="zone_id")
 flagged = snap[snap.status != "Normal Baseline"]
 critical = int(flagged.status.isin(["Critical Anomaly", "Unusual Decrease"]).sum())
 health = "Degraded" if critical else "Watch" if len(flagged) else "Nominal"
+
+
+def render_satellite_map(frame: pd.DataFrame, height: int = 470) -> None:
+    map_rows = [
+        {
+            "lat": float(r.lat),
+            "lon": float(r.lon),
+            "name": str(r.zone_name),
+            "zone": str(r.zone_id),
+            "status": str(r.status),
+            "change": float(r.pct_change),
+            "z": float(r.z_score),
+            "color": STATUS_COLOR[r.status],
+        }
+        for r in frame.itertuples()
+    ]
+    map_json = json.dumps(map_rows).replace("</", "<\\/")
+    map_html = f"""<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+    <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"><style>
+    html,body,#map{{height:100%;width:100%;margin:0;background:#081525}}#map{{border-radius:12px;overflow:hidden}}
+    .leaflet-control-attribution{{font-size:9px!important}}.leaflet-popup-content-wrapper,.leaflet-popup-tip{{background:#07162a;color:#f4f7ff}}
+    .leaflet-bar a{{background:#07162a;color:white;border-color:#344d6e}}
+    .legend{{background:#07162aee;color:#e5edf8;padding:9px 11px;border:1px solid #45617f;border-radius:9px;font:11px 'Arial',sans-serif;line-height:1.7}}
+    .dot{{display:inline-block;width:9px;height:9px;border-radius:50%;margin-right:5px}}
+    </style></head><body><div id="map"></div><script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script><script>
+    const zones={map_json};const map=L.map('map',{{zoomControl:false}}).setView([-15.425,28.315],11);
+    L.tileLayer('https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{{z}}/{{y}}/{{x}}',{{maxZoom:19,attribution:'Tiles © Esri — Source: Esri, Maxar, Earthstar Geographics, and the GIS User Community'}}).addTo(map);
+    L.control.zoom({{position:'topright'}}).addTo(map);
+    const esc=s=>String(s).replace(/[&<>"']/g,c=>({{'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}}[c]));
+    zones.forEach(z=>{{const marker=L.circleMarker([z.lat,z.lon],{{radius:8+Math.min(Math.abs(z.change),30)/6,color:'#fff',weight:2,fillColor:z.color,fillOpacity:.92}}).addTo(map);
+      marker.bindPopup('<b>'+esc(z.name)+'</b> ('+esc(z.zone)+')<br>'+esc(z.status)+' · Δ '+esc(z.change)+'% · z '+esc(z.z));}});
+    const legend=L.control({{position:'bottomleft'}});legend.onAdd=()=>{{const d=L.DomUtil.create('div','legend');d.innerHTML='<b>Zone status</b><br><span class="dot" style="background:{GREEN}"></span>Normal &nbsp; <span class="dot" style="background:{AMBER}"></span>Moderate<br><span class="dot" style="background:{RED}"></span>Critical';return d;}};legend.addTo(map);
+    L.control.scale({{imperial:false,position:'bottomright'}}).addTo(map);
+    </script></body></html>"""
+    components.html(map_html, height=height, scrolling=False)
+    st.caption("Satellite basemap © Esri and its imagery providers. Markers show the selected date’s zone status.")
+
+
+def render_trend(frame: pd.DataFrame, zone_id: str) -> None:
+    series = frame[frame.zone_id == zone_id].sort_values("date")
+    if series.empty:
+        st.info("No observations are available for this zone in the selected data.")
+        return
+    if len(series) == 1:
+        point = series.iloc[0]
+        fig = go.Figure(go.Scatter(
+            x=series.date, y=series.radiance_nW, mode="markers",
+            marker=dict(size=13, color=PINK, line=dict(color="#ffffff", width=1)),
+            name="Observed radiance",
+            customdata=[[point.status, point["pct_change"], point["z_score"]]],
+            hovertemplate="%{x|%Y-%m-%d}: %{y} nW<br>%{customdata[0]}<br>%{customdata[1]:.1f}% vs baseline<br>z=%{customdata[2]:.2f}<extra></extra>",
+        ))
+        fig.update_layout(
+            height=330, margin=dict(l=4, r=4, t=8, b=4),
+            paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
+            font=dict(color=MUTED, size=10), yaxis_title="Radiance (nW)",
+            xaxis=dict(gridcolor="rgba(140,155,176,.15)"),
+            yaxis=dict(gridcolor="rgba(140,155,176,.15)"), showlegend=False,
+        )
+        st.plotly_chart(fig, use_container_width=True, config={"displayModeBar": False})
+        st.caption(f"One CSV observation for this zone ({point["date"]:%d %b %Y}); add dates to build a timeline.")
+        return
+    mu, sd = series.baseline_mean.iloc[0], series.baseline_std.iloc[0]
+    fig = go.Figure()
+    fig.add_trace(go.Scatter(
+        x=[series.date.min(), series.date.max(), series.date.max(), series.date.min()],
+        y=[mu+2*sd, mu+2*sd, mu-2*sd, mu-2*sd], fill="toself",
+        fillcolor="rgba(117,184,255,.12)", line=dict(width=0),
+        name="Baseline ±2σ", hoverinfo="skip",
+    ))
+    fig.add_hline(y=mu, line=dict(color=SKY, dash="dash", width=1))
+    fig.add_trace(go.Scatter(x=series.date, y=series.radiance_nW, mode="lines+markers",
+                             line=dict(color=PINK, width=2.5), marker=dict(size=5, color=PINK),
+                             name="Observed radiance"))
+    deviations = series[series.status != "Normal Baseline"]
+    fig.add_trace(go.Scatter(x=deviations.date, y=deviations.radiance_nW, mode="markers",
+                             name="Flagged", marker=dict(symbol="diamond", size=10,
+                             color=deviations.status.map(STATUS_COLOR)), customdata=deviations.z_score,
+                             hovertemplate="%{x|%Y-%m}: %{y} nW, z=%{customdata}<extra></extra>"))
+    fig.update_layout(height=330, margin=dict(l=4,r=4,t=8,b=4),
+                      paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
+                      font=dict(color=MUTED,size=10), legend=dict(orientation="h",y=-.22),
+                      yaxis_title="nW", xaxis=dict(gridcolor="rgba(140,155,176,.15)"),
+                      yaxis=dict(gridcolor="rgba(140,155,176,.15)"))
+    st.plotly_chart(fig, use_container_width=True, config={"displayModeBar": False})
+
+
+def render_anomalies(frame: pd.DataFrame) -> None:
+    if frame.empty:
+        st.success("No anomalies are flagged for the selected date.")
+        return
+    st.markdown(f"**{len(frame)} locations flagged** · {critical} critical · {len(frame)-critical} moderate")
+    for row in frame.sort_values("z_score", key=abs, ascending=False).itertuples():
+        st.markdown(
+            f"<div class='card'><b>{html.escape(row.zone_name)} <span class='muted'>({html.escape(row.zone_id)})</span></b> "
+            f"<span style='color:{STATUS_COLOR[row.status]}'>{html.escape(row.status)}</span>"
+            f"<div class='muted'>Radiance {row.radiance_nW:g} nW · {row.pct_change:+.1f}% vs baseline · z {row.z_score:.2f}</div>"
+            f"<div style='font-size:.82rem;margin-top:4px'>{html.escape(row.investigation_note)}</div></div>",
+            unsafe_allow_html=True,
+        )
+
+
+if view != "home":
+    zone_names = ZONES.set_index("zone_id")["zone_name"].to_dict()
+    if view == "explore_map":
+        st.subheader("Explore Map", anchor=False)
+        st.caption(f"Satellite view of Lusaka on {sel_date} with monitored locations and anomaly status.")
+        render_satellite_map(snap, height=600)
+    elif view == "trends":
+        st.subheader("Environmental Trends", anchor=False)
+        map_col, trend_col = st.columns([1.7, 1.0], gap="medium")
+        with map_col:
+            st.markdown('<div class="panel-title"><b>⌖</b> Satellite Map</div>', unsafe_allow_html=True)
+            render_satellite_map(snap, height=520)
+        with trend_col:
+            st.markdown('<div class="panel-title"><b>⌁</b> Zone Trend</div>', unsafe_allow_html=True)
+            selected_zone = st.selectbox("Zone", ZONES.zone_id, format_func=lambda z: f"{zone_names[z]} ({z})", key="trends_zone")
+            render_trend(data, selected_zone)
+    elif view == "data_analysis":
+        st.subheader("Data & Analysis", anchor=False)
+        table_col, map_col = st.columns([1.15, 1.0], gap="medium")
+        with table_col:
+            st.markdown('<div class="panel-title"><b>▦</b> Analyzed Zone Data</div>', unsafe_allow_html=True)
+            analysis_columns = ["zone_id", "zone_name", "radiance_nW", "baseline_mean", "pct_change", "z_score", "status", "investigation_note"]
+            analysis = snap[analysis_columns].sort_values("z_score", key=abs, ascending=False).rename(columns={
+                "zone_id":"Zone", "zone_name":"Location", "radiance_nW":"Radiance (nW)",
+                "baseline_mean":"Baseline", "pct_change":"Change (%)", "z_score":"Z score",
+                "status":"Status", "investigation_note":"Investigation note",
+            })
+            st.dataframe(analysis, use_container_width=True, hide_index=True, height=520)
+        with map_col:
+            st.markdown('<div class="panel-title"><b>⌖</b> Satellite Map</div>', unsafe_allow_html=True)
+            render_satellite_map(snap, height=520)
+    elif view == "insights":
+        st.subheader("Insights", anchor=False)
+        insight_col, map_col = st.columns([1.1, 1.0], gap="medium")
+        with insight_col:
+            st.markdown('<div class="panel-title"><b>✧</b> Locations with Anomalies</div>', unsafe_allow_html=True)
+            render_anomalies(flagged)
+        with map_col:
+            st.markdown('<div class="panel-title"><b>⌖</b> Anomaly Locations</div>', unsafe_allow_html=True)
+            render_satellite_map(snap, height=520)
+    elif view == "about":
+        st.subheader("About NOVELLA", anchor=False)
+        st.markdown(
+            '<div class="panel"><p>NOVELLA monitors changes in nighttime radiance across Lusaka using NASA Black Marble observations and satellite imagery.</p>'
+            '<p>The dashboard supports exploration of the map, trends, analyzed zone data, and locations flagged for unusual changes.</p></div>',
+            unsafe_allow_html=True,
+        )
+    st.stop()
 
 left, center, right = st.columns([1.0, 2.25, 1.35], gap="small")
 with left:
@@ -257,8 +440,34 @@ with right:
     zone_names = ZONES.set_index("zone_id")["zone_name"].to_dict()
     zone_id = st.selectbox("Zone", ZONES.zone_id, format_func=lambda z: f"{zone_names[z]} ({z})")
     s = data[data.zone_id == zone_id]
-    if len(s) < 2:
-        st.info("Not enough observations to plot a timeline.")
+    if len(s) == 1:
+        point = s.iloc[0]
+        fig = go.Figure(
+            go.Scatter(
+                x=s.date,
+                y=s.radiance_nW,
+                mode="markers",
+                marker=dict(size=12, color=PINK, line=dict(color="#ffffff", width=1)),
+                name="Observed radiance",
+                customdata=[[point.status, point["pct_change"], point["z_score"]]],
+                hovertemplate="%{x|%Y-%m-%d}: %{y} nW<br>%{customdata[0]}<br>%{customdata[1]:.1f}% vs baseline<br>z=%{customdata[2]:.2f}<extra></extra>",
+            )
+        )
+        fig.update_layout(
+            height=260,
+            margin=dict(l=0, r=0, t=8, b=0),
+            paper_bgcolor="rgba(0,0,0,0)",
+            plot_bgcolor="rgba(0,0,0,0)",
+            font=dict(color=MUTED, size=10),
+            yaxis_title="Radiance (nW)",
+            xaxis=dict(gridcolor="rgba(140,155,176,.15)"),
+            yaxis=dict(gridcolor="rgba(140,155,176,.15)"),
+            showlegend=False,
+        )
+        st.plotly_chart(fig, use_container_width=True, config={"displayModeBar": False})
+        st.caption(f"One CSV observation for this zone ({point["date"]:%d %b %Y}); add dates to build a timeline.")
+    elif len(s) == 0:
+        st.info("No observations are available for this zone in the selected data.")
     else:
         mu, sd = s.baseline_mean.iloc[0], s.baseline_std.iloc[0]
         fig = go.Figure()
@@ -338,12 +547,18 @@ with right:
                 f"<div style='font-size:.82rem;margin-top:4px'>{html.escape(r.investigation_note)}</div></div>",
                 unsafe_allow_html=True,
             )
-    st.markdown("</div>", unsafe_allow_html=True)
 
 st.markdown("<br>", unsafe_allow_html=True)
 about, trend, insight_col = st.columns([1.15, 1.35, 1], gap="small")
 with about:
-    mode_label = "Configured data" if os.getenv("NOVELLA_DATA_PATH") else "Demonstration data"
+    configured_data = Path(os.getenv("NOVELLA_DATA_PATH", str(Path(__file__).with_name("novella_lusaka_processed_data.csv"))))
+    sources = set(data["data_source"].dropna().astype(str)) if "data_source" in data else set()
+    if {"Processed CSV", "Simulated demo history"}.issubset(sources):
+        mode_label = "Processed CSV snapshot + simulated history"
+    elif "Processed CSV" in sources:
+        mode_label = "Processed CSV data"
+    else:
+        mode_label = "Demonstration data"
     st.markdown(
         f'<div class="panel"><div class="panel-title"><b>✧</b> About NOVELLA</div>'
         f'<p style="color:#cfdbec;font-size:13px;line-height:1.55">NOVELLA monitors nighttime radiance changes across Lusaka zones to help investigate potential disruptions and environmental signals.</p>'
@@ -368,4 +583,3 @@ with insight_col:
                 f'<br><span class="muted">{html.escape(r.status)} · {r.pct_change:+.1f}% vs baseline</span></div>',
                 unsafe_allow_html=True,
             )
-    st.markdown("</div>", unsafe_allow_html=True)

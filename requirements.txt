@@ -3,7 +3,6 @@ pandas
 numpy
 plotly
 pydeck
-
-# Backend API dependencies
+requests
 fastapi
 uvicorn[standard]
