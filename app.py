@@ -1,8 +1,8 @@
 """NOVELLA: Lusaka anomaly detection & recovery tracking (Streamlit).
 
-Run:  pip install -r requirements.txt && streamlit run app_2.py
-Data: set NOVELLA_DATA_PATH to the pipeline's CSV (columns listed in REQUIRED).
-      Defaults to 'novella_lusaka_processed.csv' if present, otherwise demo data.
+Run:  pip install -r requirements.txt && streamlit run app.py
+API:  start FastAPI backend first (uvicorn main:app --reload --port 8000).
+      Set NOVELLA_API_URL if hosted elsewhere (defaults to http://127.0.0.1:8000).
 """
 import html
 import os
@@ -12,6 +12,7 @@ import numpy as np
 import pandas as pd
 import plotly.graph_objects as go
 import pydeck as pdk
+import requests
 import streamlit as st
 
 # ---------- Design tokens ----------
@@ -47,6 +48,7 @@ NUMERIC = [
     "baseline_std", "pct_change", "z_score",
 ]
 REQUIRED = ["zone_id", "date", *NUMERIC, "status", "investigation_note"]
+API_BASE_URL = os.environ.get("NOVELLA_API_URL", "http://127.0.0.1:8000")
 
 st.set_page_config(page_title="NOVELLA | Lusaka anomaly monitor", layout="wide")
 st.markdown(f"""<style>
@@ -67,47 +69,17 @@ def sanitize_text(s: str) -> str:
     return re.sub(r"[^\w\s.\-]", "", s, flags=re.UNICODE)[:48].strip()
 
 
-def classify(z: float) -> str:
-    return "Critical Anomaly" if abs(z) >= 3 else "Moderate Deviation" if abs(z) >= 2 else "Normal Baseline"
-
-
-def demo_data() -> pd.DataFrame:
-    base = [52, 24, 38, 41, 58, 30, 34, 28, 31, 29, 27, 26]
-    pop = [9200, 4100, 6800, 2300, 1500, 900, 3200, 7400, 8900, 11200, 5100, 9800]
-    assets = [31, 12, 19, 8, 6, 14, 7, 9, 10, 11, 8, 7]
-    dips = {(1, 0): .58, (1, 1): .66, (1, 2): .8, (3, 0): .45, (2, 0): .86, (4, 5): .7, (4, 4): .82}
-    rows = []
-    for i, z in enumerate(ZONES.zone_id):
-        rng = np.random.default_rng(1000 + i)
-        s = base[i] * (1 + (rng.random(24) - .5) * .12)
-        mean, std = s[:12].mean(), s[:12].std(ddof=1)
-        for m, v in enumerate(s):
-            rad = round(v * dips.get((i, 23 - m), 1.0), 2)
-            rain = round(rng.random() * (220 if m % 12 < 5 or m % 12 > 9 else 8), 1)
-            fires = int(rng.integers(0, 7 if rad < v else 3))
-            zs, pct = round((rad - mean) / std, 2), round((rad - mean) / mean * 100, 1)
-            st_ = classify(zs)
-            note = ("Within expected variance." if st_ == "Normal Baseline" else
-                    f"Radiance {pct}% vs baseline. Rain {rain} mm, {fires} fires within 5 km. "
-                    "Verify outage vs. cloud or seasonal effects.")
-            rows.append(dict(zone_id=z, date=pd.Timestamp(2024, 11, 1) + pd.DateOffset(months=m),
-                             radiance_nW=rad, cloud_cover_pct=int(rng.integers(0, 70)), rainfall_mm=rain,
-                             fire_count_5km=fires, pop_density_km2=pop[i], osm_critical_assets_2km=assets[i],
-                             baseline_mean=round(mean, 2), baseline_std=round(std, 2), pct_change=pct,
-                             z_score=zs, status=st_, investigation_note=note))
-    return pd.DataFrame(rows)
-
-
 @st.cache_data(show_spinner=False)
 def load_data() -> pd.DataFrame:
-    # Change the second argument below if your CSV file has a different filename
-    path = os.environ.get("NOVELLA_DATA_PATH", "novella_lusaka_processed.csv")
-    if not os.path.exists(path):
-        return demo_data()
-    df = pd.read_csv(path)
+    resp = requests.get(f"{API_BASE_URL}/api/v1/observations", params={"limit": 20000}, timeout=10)
+    resp.raise_for_status()
+    records = resp.json().get("observations", [])
+    if not records:
+        return pd.DataFrame()
+    df = pd.DataFrame(records)
     missing = [c for c in REQUIRED if c not in df.columns]
     if missing:
-        raise ValueError(f"CSV is missing columns: {', '.join(missing)}")
+        raise ValueError(f"API response is missing columns: {', '.join(missing)}")
     df["date"] = pd.to_datetime(df["date"], errors="coerce")
     for c in NUMERIC:
         df[c] = pd.to_numeric(df[c], errors="coerce")
@@ -122,17 +94,18 @@ def load_data() -> pd.DataFrame:
 
 
 try:
-    with st.spinner("Loading telemetry"):
+    with st.spinner("Loading telemetry from NOVELLA API..."):
         data = load_data()
 except Exception as exc:  # inline, recoverable error
-    st.error(f"Telemetry failed to load: {exc}")
+    st.error(f"Telemetry failed to load from {API_BASE_URL}: {exc}")
+    st.caption("Ensure the FastAPI backend is running (`uvicorn main:app --reload --port 8000`).")
     if st.button("Retry"):
         load_data.clear()
         st.rerun()
     st.stop()
 
 if data.empty:
-    st.info("No valid telemetry records found. Check NOVELLA_DATA_PATH and the column schema.")
+    st.info("No valid telemetry records returned by the API. Check NOVELLA_DATA_PATH and the column schema.")
     st.stop()
 if st.session_state.get("dropped"):
     st.warning(f"Dropped {st.session_state['dropped']} malformed records.")
