@@ -1,8 +1,8 @@
 """NOVELLA: Lusaka anomaly detection & recovery tracking (Streamlit).
 
-Run:  pip install -r requirements.txt && streamlit run app.py
+Run:  pip install -r requirements.txt && streamlit run app_2.py
 Data: set NOVELLA_DATA_PATH to the pipeline's CSV (columns listed in REQUIRED).
-      If unset, deterministic demo data is generated.
+      Defaults to 'novella_lusaka_processed.csv' if present, otherwise demo data.
 """
 import html
 import os
@@ -18,7 +18,13 @@ import streamlit as st
 BG, NAVY, BORDER = "#0B1424", "#14243A", "rgba(140,155,176,0.20)"
 TEXT, MUTED = "#F3F6FA", "#8C9BB0"
 TEAL, SKY, AMBER, RED, GREEN = "#20C9C3", "#75B8FF", "#F0B85A", "#E56B76", "#2ca02c"
-STATUS_COLOR = {"Normal Baseline": GREEN, "Moderate Deviation": AMBER, "Critical Anomaly": RED}
+STATUS_COLOR = {
+    "Normal Baseline": GREEN,
+    "Moderate Deviation": AMBER,
+    "Critical Anomaly": RED,
+    "Unusual Decrease": RED,
+    "Unusual Increase": AMBER,
+}
 
 ZONES = pd.DataFrame([
     ("LSK-01", "Lusaka CBD / Cairo Rd", -15.4167, 28.2833),
@@ -26,10 +32,20 @@ ZONES = pd.DataFrame([
     ("LSK-03", "Manda Hill / Arcades Hub", -15.4192, 28.3164),
     ("LSK-04", "Makeni Industrial Area", -15.4680, 28.2480),
     ("LSK-05", "Heavy Industrial Area", -15.4450, 28.2900),
+    ("LSK-06", "KK International Airport", -15.3308, 28.4526),
+    ("LSK-07", "Kafue Road Corridor", -15.4950, 28.2650),
+    ("LSK-08", "Chilenje", -15.4530, 28.3110),
+    ("LSK-09", "Matero", -15.3850, 28.2550),
+    ("LSK-10", "Kanyama", -15.4320, 28.2510),
+    ("LSK-11", "Chelstone", -15.3890, 28.3850),
+    ("LSK-12", "Chaisa", -15.3780, 28.2950),
 ], columns=["zone_id", "zone_name", "lat", "lon"])
 
-NUMERIC = ["radiance_nW", "cloud_cover_pct", "rainfall_mm", "fire_count_5km", "pop_density_km2",
-           "osm_critical_assets_2km", "baseline_mean", "baseline_std", "pct_change", "z_score"]
+NUMERIC = [
+    "radiance_nW", "cloud_cover_pct", "rainfall_mm", "fire_count_5km",
+    "pop_density_km2", "osm_critical_assets_2km", "baseline_mean",
+    "baseline_std", "pct_change", "z_score",
+]
 REQUIRED = ["zone_id", "date", *NUMERIC, "status", "investigation_note"]
 
 st.set_page_config(page_title="NOVELLA | Lusaka anomaly monitor", layout="wide")
@@ -56,7 +72,9 @@ def classify(z: float) -> str:
 
 
 def demo_data() -> pd.DataFrame:
-    base = [52, 24, 38, 41, 58]; pop = [9200, 4100, 6800, 2300, 1500]; assets = [31, 12, 19, 8, 6]
+    base = [52, 24, 38, 41, 58, 30, 34, 28, 31, 29, 27, 26]
+    pop = [9200, 4100, 6800, 2300, 1500, 900, 3200, 7400, 8900, 11200, 5100, 9800]
+    assets = [31, 12, 19, 8, 6, 14, 7, 9, 10, 11, 8, 7]
     dips = {(1, 0): .58, (1, 1): .66, (1, 2): .8, (3, 0): .45, (2, 0): .86, (4, 5): .7, (4, 4): .82}
     rows = []
     for i, z in enumerate(ZONES.zone_id):
@@ -82,8 +100,9 @@ def demo_data() -> pd.DataFrame:
 
 @st.cache_data(show_spinner=False)
 def load_data() -> pd.DataFrame:
-    path = os.environ.get("NOVELLA_DATA_PATH")
-    if not path:
+    # Change the second argument below if your CSV file has a different filename
+    path = os.environ.get("NOVELLA_DATA_PATH", "novella_lusaka_processed.csv")
+    if not os.path.exists(path):
         return demo_data()
     df = pd.read_csv(path)
     missing = [c for c in REQUIRED if c not in df.columns]
@@ -92,6 +111,7 @@ def load_data() -> pd.DataFrame:
     df["date"] = pd.to_datetime(df["date"], errors="coerce")
     for c in NUMERIC:
         df[c] = pd.to_numeric(df[c], errors="coerce")
+    df["pop_density_km2"] = df["pop_density_km2"].fillna(0)
     df["investigation_note"] = df["investigation_note"].astype(str)
     before = len(df)
     df = df.dropna(subset=["date", *NUMERIC])
@@ -107,7 +127,8 @@ try:
 except Exception as exc:  # inline, recoverable error
     st.error(f"Telemetry failed to load: {exc}")
     if st.button("Retry"):
-        load_data.clear(); st.rerun()
+        load_data.clear()
+        st.rerun()
     st.stop()
 
 if data.empty:
@@ -120,10 +141,15 @@ if st.session_state.get("dropped"):
 dates = sorted(data["date"].dt.date.unique())
 t1, t2, t3, t4 = st.columns([1, 1, 1, 1.4])
 with t4:
-    sel_date = st.select_slider("Observation date", options=dates, value=dates[-1], format_func=lambda d: d.isoformat())
+    if len(dates) > 1:
+        sel_date = st.select_slider("Observation date", options=dates, value=dates[-1], format_func=lambda d: d.isoformat())
+    else:
+        sel_date = dates[0]
+        st.metric("Observation date", sel_date.isoformat())
+
 snap = data[data["date"].dt.date == sel_date].merge(ZONES, on="zone_id")
 flagged = snap[snap.status != "Normal Baseline"]
-critical = int((flagged.status == "Critical Anomaly").sum())
+critical = int(flagged.status.isin(["Critical Anomaly", "Unusual Decrease"]).sum())
 health = "Degraded" if critical else "Watch" if len(flagged) else "Nominal"
 t1.metric("Active zones", snap.zone_id.nunique())
 t2.metric("System health", health)
@@ -178,7 +204,7 @@ with right:
 
     st.subheader("Flagged locations", anchor=False)
     q = sanitize_text(st.text_input("Search zone", max_chars=48, placeholder="e.g. Kabulonga or LSK-04"))
-    status_f = st.selectbox("Status", ["All", "Moderate Deviation", "Critical Anomaly"])
+    status_f = st.selectbox("Status", ["All", "Moderate Deviation", "Critical Anomaly", "Unusual Decrease", "Unusual Increase"])
     rows = flagged
     if status_f != "All":
         rows = rows[rows.status == status_f]
